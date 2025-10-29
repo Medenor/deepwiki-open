@@ -725,7 +725,7 @@ def get_codeberg_file_content(repo_url: str, file_path: str, access_token: str =
                 if encoding == 'base64':
                     try:
                         return base64.b64decode(content.encode('utf-8')).decode('utf-8')
-                    except Exception as decode_error:
+                    except (base64.binascii.Error, UnicodeDecodeError) as decode_error:
                         raise ValueError(f"Failed to decode Codeberg file content: {decode_error}")
                 return content
             elif response.status_code == 404:
