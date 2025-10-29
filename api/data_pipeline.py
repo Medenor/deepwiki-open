@@ -66,6 +66,11 @@ def count_tokens(text: str, embedder_type: str = None, is_ollama_embedder: bool 
         # Rough approximation: 4 characters per token
         return len(text) // 4
 
+CODEBERG_PRIVATE_REPO_ERROR = (
+    "Codeberg private repositories are not supported. Please use a public repository without an access token."
+)
+
+
 def download_repo(repo_url: str, local_path: str, repo_type: str = None, access_token: str = None) -> str:
     """
     Downloads a Git repository (GitHub, GitLab, Bitbucket, or Codeberg) to a specified local path.
@@ -101,6 +106,8 @@ def download_repo(repo_url: str, local_path: str, repo_type: str = None, access_
         # Prepare the clone URL with access token if provided
         clone_url = repo_url
         if access_token:
+            if repo_type == "codeberg":
+                raise ValueError(CODEBERG_PRIVATE_REPO_ERROR)
             try:
                 clone_url = _build_clone_url(repo_url, repo_type, access_token)
             except ValueError as exc:
@@ -673,6 +680,9 @@ def get_bitbucket_file_content(repo_url: str, file_path: str, access_token: str 
 def get_codeberg_file_content(repo_url: str, file_path: str, access_token: str = None) -> str:
     """Retrieve file content from a Codeberg (Forgejo/Gitea) repository."""
     try:
+        if access_token:
+            raise ValueError(CODEBERG_PRIVATE_REPO_ERROR)
+
         parsed_url = urlparse(repo_url)
         if not parsed_url.scheme or not parsed_url.netloc:
             raise ValueError("Not a valid Codeberg repository URL")
@@ -693,8 +703,6 @@ def get_codeberg_file_content(repo_url: str, file_path: str, access_token: str =
         headers = {
             'Accept': 'application/json'
         }
-        if access_token:
-            headers['Authorization'] = f"token {access_token}"
 
         # Fetch repository info to determine default branch
         default_branch = 'main'
@@ -956,7 +964,7 @@ def _build_clone_url(repo_url: str, repo_type: str, access_token: str) -> str:
     """Construct a git clone URL with the provided access token."""
 
     if repo_type == "codeberg":
-        raise ValueError("Codeberg private repositories are not supported. Please use a public repository without an access token.")
+        raise ValueError(CODEBERG_PRIVATE_REPO_ERROR)
 
     parsed = urlparse(repo_url)
     encoded_token = quote(access_token, safe='')
