@@ -36,4 +36,4 @@ def test_build_clone_url_codeberg_without_username(monkeypatch):
 
     clone_url = data_pipeline._build_clone_url(repo_url, "codeberg", "secret")
 
-    assert clone_url == "https://secret@codeberg.org/user/private-repo"
+    assert clone_url == "https://user:secret@codeberg.org/user/private-repo"

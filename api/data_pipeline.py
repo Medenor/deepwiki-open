@@ -963,6 +963,10 @@ def _build_clone_url(repo_url: str, repo_type: str, access_token: str) -> str:
         netloc = f"x-token-auth:{encoded_token}@{parsed.netloc}"
     elif repo_type == "codeberg":
         username = get_codeberg_username(access_token)
+        if not username:
+            path_parts = [part for part in parsed.path.split('/') if part]
+            if path_parts:
+                username = path_parts[0]
         if username:
             encoded_username = quote(username, safe='')
             netloc = f"{encoded_username}:{encoded_token}@{parsed.netloc}"
