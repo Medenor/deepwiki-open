@@ -771,7 +771,7 @@ def get_file_content(repo_url: str, file_path: str, repo_type: str = None, acces
     elif repo_type == "codeberg":
         return get_codeberg_file_content(repo_url, file_path, access_token)
     else:
-        raise ValueError("Unsupported repository type. Only GitHub, GitLab, and Bitbucket are supported.")
+        raise ValueError("Unsupported repository type. Only GitHub, GitLab, Bitbucket, and Codeberg are supported.")
 
 class DatabaseManager:
     """
