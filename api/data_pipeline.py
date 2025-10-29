@@ -68,7 +68,7 @@ def count_tokens(text: str, embedder_type: str = None, is_ollama_embedder: bool 
 
 def download_repo(repo_url: str, local_path: str, repo_type: str = None, access_token: str = None) -> str:
     """
-    Downloads a Git repository (GitHub, GitLab, or Bitbucket) to a specified local path.
+    Downloads a Git repository (GitHub, GitLab, Bitbucket, or Codeberg) to a specified local path.
 
     Args:
         repo_type(str): Type of repository
@@ -101,19 +101,10 @@ def download_repo(repo_url: str, local_path: str, repo_type: str = None, access_
         # Prepare the clone URL with access token if provided
         clone_url = repo_url
         if access_token:
-            parsed = urlparse(repo_url)
-            # Determine the repository type and format the URL accordingly
-            if repo_type == "github":
-                # Format: https://{token}@{domain}/owner/repo.git
-                # Works for both github.com and enterprise GitHub domains
-                clone_url = urlunparse((parsed.scheme, f"{access_token}@{parsed.netloc}", parsed.path, '', '', ''))
-            elif repo_type == "gitlab":
-                # Format: https://oauth2:{token}@gitlab.com/owner/repo.git
-                clone_url = urlunparse((parsed.scheme, f"oauth2:{access_token}@{parsed.netloc}", parsed.path, '', '', ''))
-            elif repo_type == "bitbucket":
-                # Format: https://x-token-auth:{token}@bitbucket.org/owner/repo.git
-                clone_url = urlunparse((parsed.scheme, f"x-token-auth:{access_token}@{parsed.netloc}", parsed.path, '', '', ''))
-
+            try:
+                clone_url = _build_clone_url(repo_url, repo_type, access_token)
+            except ValueError as exc:
+                raise ValueError(str(exc))
             logger.info("Using access token for authentication")
 
         # Clone the repository
@@ -132,8 +123,12 @@ def download_repo(repo_url: str, local_path: str, repo_type: str = None, access_
     except subprocess.CalledProcessError as e:
         error_msg = e.stderr.decode('utf-8')
         # Sanitize error message to remove any tokens
-        if access_token and access_token in error_msg:
-            error_msg = error_msg.replace(access_token, "***TOKEN***")
+        if access_token:
+            if access_token in error_msg:
+                error_msg = error_msg.replace(access_token, "***TOKEN***")
+            encoded_token = quote(access_token, safe='')
+            if encoded_token in error_msg:
+                error_msg = error_msg.replace(encoded_token, "***TOKEN***")
         raise ValueError(f"Error during cloning: {error_msg}")
     except Exception as e:
         raise ValueError(f"An unexpected error occurred: {str(e)}")
@@ -675,6 +670,77 @@ def get_bitbucket_file_content(repo_url: str, file_path: str, access_token: str 
         raise ValueError(f"Failed to get file content: {str(e)}")
 
 
+def get_codeberg_file_content(repo_url: str, file_path: str, access_token: str = None) -> str:
+    """Retrieve file content from a Codeberg (Forgejo/Gitea) repository."""
+    try:
+        parsed_url = urlparse(repo_url)
+        if not parsed_url.scheme or not parsed_url.netloc:
+            raise ValueError("Not a valid Codeberg repository URL")
+
+        repo_path = parsed_url.path.strip('/').replace('.git', '')
+        if not repo_path:
+            raise ValueError("Invalid Codeberg URL format")
+
+        # Encode each part of the repo path separately to preserve hierarchy
+        encoded_repo_path = '/'.join(quote(part, safe='') for part in repo_path.split('/'))
+        encoded_file_path = quote(file_path, safe='')
+
+        api_base = f"{parsed_url.scheme}://{parsed_url.netloc}"
+        if parsed_url.port not in (None, 80, 443):
+            api_base += f":{parsed_url.port}"
+        api_base += "/api/v1"
+
+        headers = {
+            'Accept': 'application/json'
+        }
+        if access_token:
+            headers['Authorization'] = f"token {access_token}"
+
+        # Fetch repository info to determine default branch
+        default_branch = 'main'
+        try:
+            repo_info_url = f"{api_base}/repos/{encoded_repo_path}"
+            repo_info_response = requests.get(repo_info_url, headers=headers)
+            if repo_info_response.status_code == 200:
+                repo_info = repo_info_response.json()
+                default_branch = repo_info.get('default_branch') or default_branch
+            else:
+                logger.warning("Could not fetch Codeberg repository info, using 'main' as default branch")
+        except Exception as exc:
+            logger.warning(f"Error fetching Codeberg repository info: {exc}. Using 'main' as default branch")
+
+        file_url = f"{api_base}/repos/{encoded_repo_path}/contents/{encoded_file_path}?ref={quote(default_branch, safe='')}"
+        logger.info(f"Fetching file content from Codeberg API: {file_url}")
+        try:
+            response = requests.get(file_url, headers=headers)
+            if response.status_code == 200:
+                data = response.json()
+                content = data.get('content', '')
+                encoding = data.get('encoding', 'base64')
+                if encoding == 'base64':
+                    try:
+                        return base64.b64decode(content.encode('utf-8')).decode('utf-8')
+                    except Exception as decode_error:
+                        raise ValueError(f"Failed to decode Codeberg file content: {decode_error}")
+                return content
+            elif response.status_code == 404:
+                raise ValueError("File not found on Codeberg. Please check the file path and repository.")
+            elif response.status_code == 401:
+                raise ValueError("Unauthorized access to Codeberg. Please check your access token.")
+            elif response.status_code == 403:
+                raise ValueError("Forbidden access to Codeberg. You might not have permission to access this file.")
+            elif response.status_code >= 500:
+                raise ValueError("Codeberg server error. Please try again later.")
+            else:
+                response.raise_for_status()
+                return response.text
+        except RequestException as exc:
+            raise ValueError(f"Error fetching file content: {exc}")
+
+    except Exception as e:
+        raise ValueError(f"Failed to get file content: {str(e)}")
+
+
 def get_file_content(repo_url: str, file_path: str, repo_type: str = None, access_token: str = None) -> str:
     """
     Retrieves the content of a file from a Git repository (GitHub or GitLab).
@@ -697,6 +763,8 @@ def get_file_content(repo_url: str, file_path: str, repo_type: str = None, acces
         return get_gitlab_file_content(repo_url, file_path, access_token)
     elif repo_type == "bitbucket":
         return get_bitbucket_file_content(repo_url, file_path, access_token)
+    elif repo_type == "codeberg":
+        return get_codeberg_file_content(repo_url, file_path, access_token)
     else:
         raise ValueError("Unsupported repository type. Only GitHub, GitLab, and Bitbucket are supported.")
 
@@ -754,10 +822,11 @@ class DatabaseManager:
         # Extract owner and repo name to create unique identifier
         url_parts = repo_url_or_path.rstrip('/').split('/')
 
-        if repo_type in ["github", "gitlab", "bitbucket"] and len(url_parts) >= 5:
+        if repo_type in ["github", "gitlab", "bitbucket", "codeberg"] and len(url_parts) >= 5:
             # GitHub URL format: https://github.com/owner/repo
             # GitLab URL format: https://gitlab.com/owner/repo or https://gitlab.com/group/subgroup/repo
             # Bitbucket URL format: https://bitbucket.org/owner/repo
+            # Codeberg URL format: https://codeberg.org/owner/repo
             owner = url_parts[-2]
             repo = url_parts[-1].replace(".git", "")
             repo_name = f"{owner}_{repo}"
@@ -883,3 +952,21 @@ class DatabaseManager:
             List[Document]: List of Document objects
         """
         return self.prepare_database(repo_url_or_path, repo_type, access_token)
+def _build_clone_url(repo_url: str, repo_type: str, access_token: str) -> str:
+    """Construct a git clone URL with the provided access token."""
+
+    if repo_type == "codeberg":
+        raise ValueError("Codeberg private repositories are not supported. Please use a public repository without an access token.")
+
+    parsed = urlparse(repo_url)
+    encoded_token = quote(access_token, safe='')
+
+    if repo_type == "gitlab":
+        netloc = f"oauth2:{encoded_token}@{parsed.netloc}"
+    elif repo_type == "bitbucket":
+        netloc = f"x-token-auth:{encoded_token}@{parsed.netloc}"
+    else:
+        netloc = f"{encoded_token}@{parsed.netloc}"
+
+    return urlunparse((parsed.scheme, netloc, parsed.path, '', '', ''))
+
