@@ -711,7 +711,7 @@ def get_codeberg_file_content(repo_url: str, file_path: str, access_token: str =
                 default_branch = repo_info.get('default_branch') or default_branch
             else:
                 logger.warning("Could not fetch Codeberg repository info, using 'main' as default branch")
-        except Exception as exc:
+        except RequestException as exc:
             logger.warning(f"Error fetching Codeberg repository info: {exc}. Using 'main' as default branch")
 
         file_url = f"{api_base}/repos/{encoded_repo_path}/contents/{encoded_file_path}?ref={quote(default_branch, safe='')}"
