@@ -30,7 +30,7 @@ def count_tokens(text: str, embedder_type: str = None, is_ollama_embedder: bool 
 
     Args:
         text (str): The text to count tokens for.
-        embedder_type (str, optional): The embedder type ('openai', 'google', 'ollama').
+        embedder_type (str, optional): The embedder type ('openai', 'google', 'ollama', 'bedrock').
                                      If None, will be determined from configuration.
         is_ollama_embedder (bool, optional): DEPRECATED. Use embedder_type instead.
                                            If None, will be determined from configuration.
@@ -54,6 +54,9 @@ def count_tokens(text: str, embedder_type: str = None, is_ollama_embedder: bool 
             encoding = tiktoken.get_encoding("cl100k_base")
         elif embedder_type == 'google':
             # Google uses similar tokenization to GPT models for rough estimation
+            encoding = tiktoken.get_encoding("cl100k_base")
+        elif embedder_type == 'bedrock':
+            # Bedrock embedding models vary; use a common GPT-like encoding for rough estimation
             encoding = tiktoken.get_encoding("cl100k_base")
         else:  # OpenAI or default
             # Use OpenAI embedding model encoding
@@ -102,17 +105,19 @@ def download_repo(repo_url: str, local_path: str, repo_type: str = None, access_
         clone_url = repo_url
         if access_token:
             parsed = urlparse(repo_url)
+            # URL-encode the token to handle special characters
+            encoded_token = quote(access_token, safe='')
             # Determine the repository type and format the URL accordingly
             if repo_type == "github" or repo_type == "codeberg":
                 # Format: https://{token}@{domain}/owner/repo.git
                 # Works for both github.com and enterprise GitHub domains
-                clone_url = urlunparse((parsed.scheme, f"{access_token}@{parsed.netloc}", parsed.path, '', '', ''))
+                clone_url = urlunparse((parsed.scheme, f"{encoded_token}@{parsed.netloc}", parsed.path, '', '', ''))
             elif repo_type == "gitlab":
                 # Format: https://oauth2:{token}@gitlab.com/owner/repo.git
-                clone_url = urlunparse((parsed.scheme, f"oauth2:{access_token}@{parsed.netloc}", parsed.path, '', '', ''))
+                clone_url = urlunparse((parsed.scheme, f"oauth2:{encoded_token}@{parsed.netloc}", parsed.path, '', '', ''))
             elif repo_type == "bitbucket":
                 # Format: https://x-token-auth:{token}@bitbucket.org/owner/repo.git
-                clone_url = urlunparse((parsed.scheme, f"x-token-auth:{access_token}@{parsed.netloc}", parsed.path, '', '', ''))
+                clone_url = urlunparse((parsed.scheme, f"x-token-auth:{encoded_token}@{parsed.netloc}", parsed.path, '', '', ''))
 
             logger.info("Using access token for authentication")
 
@@ -131,9 +136,13 @@ def download_repo(repo_url: str, local_path: str, repo_type: str = None, access_
 
     except subprocess.CalledProcessError as e:
         error_msg = e.stderr.decode('utf-8')
-        # Sanitize error message to remove any tokens
-        if access_token and access_token in error_msg:
+        # Sanitize error message to remove any tokens (both raw and URL-encoded)
+        if access_token:
+            # Remove raw token
             error_msg = error_msg.replace(access_token, "***TOKEN***")
+            # Also remove URL-encoded token to prevent leaking encoded version
+            encoded_token = quote(access_token, safe='')
+            error_msg = error_msg.replace(encoded_token, "***TOKEN***")
         raise ValueError(f"Error during cloning: {error_msg}")
     except Exception as e:
         raise ValueError(f"An unexpected error occurred: {str(e)}")
@@ -854,6 +863,9 @@ class DatabaseManager:
         logger.info(f"Preparing repo storage for {repo_url_or_path}...")
 
         try:
+            # Strip whitespace to handle URLs with leading/trailing spaces
+            repo_url_or_path = repo_url_or_path.strip()
+            
             root_path = get_adalflow_default_root_path()
 
             os.makedirs(root_path, exist_ok=True)
@@ -909,6 +921,21 @@ class DatabaseManager:
         Returns:
             List[Document]: List of Document objects
         """
+        def _embedding_vector_length(doc: Document) -> int:
+            vector = getattr(doc, "vector", None)
+            if vector is None:
+                return 0
+            try:
+                if hasattr(vector, "shape"):
+                    if len(vector.shape) == 0:
+                        return 0
+                    return int(vector.shape[-1])
+                if hasattr(vector, "__len__"):
+                    return int(len(vector))
+            except Exception:
+                return 0
+            return 0
+
         # Handle backward compatibility
         if embedder_type is None and is_ollama_embedder is not None:
             embedder_type = 'ollama' if is_ollama_embedder else None
@@ -919,8 +946,24 @@ class DatabaseManager:
                 self.db = LocalDB.load_state(self.repo_paths["save_db_file"])
                 documents = self.db.get_transformed_data(key="split_and_embed")
                 if documents:
-                    logger.info(f"Loaded {len(documents)} documents from existing database")
-                    return documents
+                    lengths = [_embedding_vector_length(doc) for doc in documents]
+                    non_empty = sum(1 for n in lengths if n > 0)
+                    empty = len(lengths) - non_empty
+                    sample_sizes = sorted({n for n in lengths if n > 0})[:3]
+                    logger.info(
+                        "Loaded %s documents from existing database (embeddings: %s non-empty, %s empty; sample_dims=%s)",
+                        len(documents),
+                        non_empty,
+                        empty,
+                        sample_sizes,
+                    )
+
+                    if non_empty == 0:
+                        logger.warning(
+                            "Existing database contains no usable embeddings. Rebuilding embeddings..."
+                        )
+                    else:
+                        return documents
             except Exception as e:
                 logger.error(f"Error loading existing database: {e}")
                 # Continue to create a new database
